@@ -1,6 +1,6 @@
 /*
 Copyright 2019 alanswx
-with help from the MiSTer contributors including Grabulosaure 
+with help from the MiSTer contributors including Grabulosaure
 */
 
 #include <stdlib.h>
@@ -20,7 +20,7 @@ with help from the MiSTer contributors including Grabulosaure
 
 const char *version = "$VER:ScreenShot" VDATE;
 
-#define BASEADDR 536870912 
+#define BASEADDR 536870912
 
 unsigned char buffer[2048*3*1024];
 
@@ -29,7 +29,7 @@ void mister_scaler_free(mister_scaler *);
 
 int main(int argc, char *argv[])
 {
-	const char *output_dir = "/tmp/screenshots";
+    const char *output_dir = "/tmp/screenshots";
     char filename[4096];
     strcpy(filename, "MiSTer_screenshot.png");
     if (argc > 1)
@@ -43,7 +43,7 @@ int main(int argc, char *argv[])
         strncpy(filename, name, sizeof(filename) - 1);
         filename[sizeof(filename) - 1] = '\0';
     }
-	
+
     mkdir(output_dir, 0777);
 
     char output_path[4096 + 512];
@@ -52,12 +52,12 @@ int main(int argc, char *argv[])
     mister_scaler *ms=mister_scaler_init();
     if (ms==NULL)
     {
-	    fprintf(stderr,"some problem with the mister scaler, maybe this core doesn't support it\n");
-	    exit(1);
-    } 
+            fprintf(stderr,"some problem with the mister scaler, maybe this core doesn't support it\n");
+            exit(1);
+    }
     fprintf(stderr,"\nScreenshot code by alanswx\n\n");
     fprintf(stderr,"Version %s\n\n", version + 5);
-   
+
     unsigned char *outputbuf = (unsigned char*)calloc(ms->width * ms->height * 4, 1);
     mister_scaler_read_32(ms, outputbuf);
     Imlib_Image im = imlib_create_image_using_data(ms->width, ms->height, (unsigned int *)outputbuf);
@@ -67,7 +67,7 @@ int main(int argc, char *argv[])
     imlib_save_image(output_path);
     printf("saved screenshot to [%s]\n", output_path);
     //free(outputbuf);
-    mister_scaler_free(ms); 
+    mister_scaler_free(ms);
 
     return 0;
 }
