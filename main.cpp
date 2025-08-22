@@ -29,8 +29,8 @@ void mister_scaler_free(mister_scaler *);
 int main(int argc, char *argv[])
 {
     // Always write into RAM tmp folder
-    mkdir("/tmp/screenshots", 0777);
-    chdir("/tmp/screenshots");
+    mkdir("/tmp/.SAM_tmp/screenshots", 0777);
+    chdir("/tmp/.SAM_tmp/screenshots");
 
     char filename[4096];
     strcpy(filename,"MiSTer_screenshot.png");
@@ -62,7 +62,7 @@ int main(int argc, char *argv[])
     else
     {
         imlib_save_image(filename);
-        printf("saved: /tmp/screenshots/%s\n", filename);
+        printf("saved: /tmp/.SAM_tmp/screenshots/%s\n", filename);
     }
 
     // No scaled image anymore
