@@ -242,17 +242,29 @@ int main(int, char**) {
     uint32_t last_color = 0;
     bool first = true;
     const int step = 4; // sample every 4th pixel to reduce CPU usage
+   
+     // Cache header-derived fields but refresh them when the header moves
+    int header = ms->header;
+    int width  = ms->width;
+    int height = ms->height;
+    int line   = ms->line;
+    int out_w  = ms->output_width;
+    int out_h  = ms->output_height;
 
     while (1) {
-        // Refresh header fields for current frame
-        int header = buffer[2] << 8 | buffer[3];
+       // Read the current frame offset and update cached dimensions if needed
+        int new_header = buffer[2] << 8 | buffer[3];
+        if (new_header != header) {
+            header = new_header;
+            width  = buffer[6]  << 8 | buffer[7];
+            height = buffer[8]  << 8 | buffer[9];
+            line   = buffer[10] << 8 | buffer[11];
+            out_w  = buffer[12] << 8 | buffer[13];
+            out_h  = buffer[14] << 8 | buffer[15];
+        }
+
         int bpp = buffer[4];
         uint8_t hdr5 = buffer[5];
-        int width = buffer[6] << 8 | buffer[7];
-        int height = buffer[8] << 8 | buffer[9];
-        int line = buffer[10] << 8 | buffer[11];
-        int out_w = buffer[12] << 8 | buffer[13];
-        int out_h = buffer[14] << 8 | buffer[15];
         (void)out_w;
         (void)out_h;
         (void)hdr5;
