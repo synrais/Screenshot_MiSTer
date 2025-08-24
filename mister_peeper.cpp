@@ -1,11 +1,11 @@
 // mister_peeper.cpp
 //
-// MiSTer framebuffer monitor
-// Reports: timestamp, resolution, depth, format, endian, main color, Δt since last change
-// Prints all info on one line per change
+// MiSTer framebuffer monitor (all cores)
+// Uses the same ASCAL header parsing as Screenshot_MiSTer
+// Reports: timestamp, resolution, depth, format, endian, main color, Δt
 //
 // Build: g++ -O2 -std=c++17 mister_peeper.cpp -o mister_peeper
-// Run as root: sudo ./mister_peeper
+// Run:   sudo ./mister_peeper
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -17,24 +17,24 @@
 #include <thread>
 #include <ctime>
 #include <string>
+#include <cstdint>
 
-// Correct ASCAL header definition (from MiSTer Screenshot source)
-struct AscalHeader {
-    uint32_t magic;      // "ASCL" = 0x4C534341
+struct ascal_header {
+    uint32_t magic;        // 'ASCL'
     uint16_t version;
     uint16_t header_size;
     uint16_t width;
     uint16_t height;
     uint16_t pitch;
-    uint16_t format;     // 0=RGB, 1=ARGB, 2=YUV
-    uint16_t depth;      // bits per pixel
-    uint16_t flags;      // bit0=endian (0=LE, 1=BE)
-    uint32_t fb_offset;  // framebuffer offset
-    uint32_t fb_size;    // framebuffer size
+    uint16_t format;       // 0=RGB, 1=ARGB, 2=YUV
+    uint16_t depth;        // bits per pixel
+    uint16_t flags;        // bit0=endian
+    uint32_t fb_offset;
+    uint32_t fb_size;
 };
 
-constexpr off_t ASCAL_BASE = 0x20000000; // ASCAL base address
-constexpr size_t MAP_SIZE = 2*1024*1024; // map 2MB window (safe)
+constexpr off_t ASCAL_BASE = 0x2C000000; // Correct MiSTer ASCAL base
+constexpr size_t MAP_SIZE  = 4*1024*1024; // map 4MB for header + fb
 
 uint8_t* map_dev_mem(off_t offset, size_t size) {
     int fd = open("/dev/mem", O_RDONLY | O_SYNC);
@@ -63,15 +63,15 @@ std::string format_desc(uint16_t fmt, uint16_t depth, bool endian) {
 
 int main() {
     uint8_t* base = map_dev_mem(ASCAL_BASE, MAP_SIZE);
-    auto* hdr = reinterpret_cast<AscalHeader*>(base);
+    auto* hdr = reinterpret_cast<ascal_header*>(base);
 
-    // Verify header
+    // Verify header magic
     if (hdr->magic != 0x4C534341) { // "ASCL"
         std::cerr << "ASCAL header magic not found (expected 'ASCL')" << std::endl;
         return 1;
     }
 
-    uint8_t* counter_ptr = base + 5;
+    uint8_t* counter_ptr = base + 5; // frame counter inside header
     uint8_t last_counter = *counter_ptr;
     auto last_time = std::chrono::steady_clock::now();
 
@@ -93,9 +93,9 @@ int main() {
             size_t fb_size = hdr->fb_size;
             uint8_t* fb = base + fb_off;
 
-            // Sample pixels
+            // Sample pixels (sparse scan)
             std::unordered_map<uint32_t, size_t> freq;
-            size_t step = (depth/8 > 0) ? (depth/8) * 100 : 3;
+            size_t step = (depth/8 > 0) ? (depth/8) * 200 : 3; // skip pixels for speed
             for (size_t i = 0; i + (depth/8) <= fb_size; i += step) {
                 uint32_t rgb = 0;
                 if (depth == 16) {
@@ -113,7 +113,7 @@ int main() {
                 } else if (depth == 32) {
                     uint32_t px = *reinterpret_cast<uint32_t*>(fb+i);
                     if (endian) px = __builtin_bswap32(px);
-                    rgb = px & 0xFFFFFF;
+                    rgb = px & 0xFFFFFF; // ignore alpha
                 }
                 freq[rgb]++;
             }
