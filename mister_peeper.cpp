@@ -236,9 +236,12 @@ int main(int, char**) {
 
     unsigned char *buffer = (unsigned char*)(ms->map + ms->map_off);
     int bpp = buffer[4];
+    uint8_t hdr5 = buffer[5];
     int width = ms->width;
     int height = ms->height;
     int line = ms->line;
+    int out_w = ms->output_width;
+    int out_h = ms->output_height;
 
     const char *pixfmt = "Unknown";
     switch (bpp) {
@@ -248,15 +251,26 @@ int main(int, char**) {
         case 4: pixfmt = "ARGB8888"; break;
     }
 
+    std::printf("Header offset: %d\n", ms->header);
     std::printf("Width: %d\n", width);
     std::printf("Height: %d\n", height);
+    std::printf("Output width: %d\n", out_w);
+    std::printf("Output height: %d\n", out_h);
+    std::printf("Line stride: %d\n", line);
     std::printf("Color depth: %d bits\n", bpp * 8);
     std::printf("Pixel format: %s\n", pixfmt);
+    std::printf("Colorspace: RGB\n");
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
     std::printf("Endianness: little\n");
 #else
     std::printf("Endianness: big\n");
 #endif
+    std::printf("Interlaced: %s\n", (hdr5 & 0x01) ? "yes" : "no");
+    std::printf("Field: %d\n", (hdr5 >> 1) & 0x01);
+    std::printf("Horizontal downscale: %s\n", (hdr5 & 0x04) ? "yes" : "no");
+    std::printf("Vertical downscale: %s\n", (hdr5 & 0x08) ? "yes" : "no");
+    std::printf("Triple buffered: %s\n", (hdr5 & 0x10) ? "yes" : "no");
+    std::printf("Frame counter: %d\n", (hdr5 >> 5) & 0x07);
 
     auto last_change = std::chrono::steady_clock::now();
     uint64_t last_hash = 0;
