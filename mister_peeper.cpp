@@ -234,43 +234,8 @@ int main(int, char**) {
         return 1;
     }
 
-    volatile unsigned char *buffer = (volatile unsigned char*)(ms->map + ms->map_off);
-    int bpp = buffer[4];
-    uint8_t hdr5 = buffer[5];
-    int width = ms->width;
-    int height = ms->height;
-    int line = ms->line;
-    int out_w = ms->output_width;
-    int out_h = ms->output_height;
-
-    const char *pixfmt = "Unknown";
-    switch (bpp) {
-        case 1: pixfmt = "8-bit"; break;
-        case 2: pixfmt = "RGB565"; break;
-        case 3: pixfmt = "RGB888"; break;
-        case 4: pixfmt = "ARGB8888"; break;
-    }
-
-    std::printf("Header offset: %d\n", ms->header);
-    std::printf("Width: %d\n", width);
-    std::printf("Height: %d\n", height);
-    std::printf("Output width: %d\n", out_w);
-    std::printf("Output height: %d\n", out_h);
-    std::printf("Line stride: %d\n", line);
-    std::printf("Color depth: %d bits\n", bpp * 8);
-    std::printf("Pixel format: %s\n", pixfmt);
-    std::printf("Colorspace: RGB\n");
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-    std::printf("Endianness: little\n");
-#else
-    std::printf("Endianness: big\n");
-#endif
-    std::printf("Interlaced: %s\n", (hdr5 & 0x01) ? "yes" : "no");
-    std::printf("Field: %d\n", (hdr5 >> 1) & 0x01);
-    std::printf("Horizontal downscale: %s\n", (hdr5 & 0x04) ? "yes" : "no");
-    std::printf("Vertical downscale: %s\n", (hdr5 & 0x08) ? "yes" : "no");
-    std::printf("Triple buffered: %s\n", (hdr5 & 0x10) ? "yes" : "no");
-    std::printf("Frame counter: %d\n", (hdr5 >> 5) & 0x07);
+    volatile unsigned char *buffer =
+        (volatile unsigned char *)(ms->map + ms->map_off);
 
     auto last_change = std::chrono::steady_clock::now();
     uint64_t last_hash = 0;
@@ -279,21 +244,57 @@ int main(int, char**) {
     const int step = 4; // sample every 4th pixel to reduce CPU usage
 
     while (1) {
-        const volatile unsigned char *frame = buffer + ms->header;
-        uint64_t hash = sample_hash(frame, width, height, line, bpp, step);
-        uint32_t color = dominant_color(frame, width, height, line, bpp, step);
+        // Refresh header fields for current frame
+        int header = buffer[2] << 8 | buffer[3];
+        int bpp = buffer[4];
+        uint8_t hdr5 = buffer[5];
+        int width = buffer[6] << 8 | buffer[7];
+        int height = buffer[8] << 8 | buffer[9];
+        int line = buffer[10] << 8 | buffer[11];
+        int out_w = buffer[12] << 8 | buffer[13];
+        int out_h = buffer[14] << 8 | buffer[15];
+        (void)out_w;
+        (void)out_h;
+        (void)hdr5;
+
+        const char *pixfmt = "Unknown";
+        switch (bpp) {
+            case 1: pixfmt = "8-bit"; break;
+            case 2: pixfmt = "RGB565"; break;
+            case 3: pixfmt = "RGB888"; break;
+            case 4: pixfmt = "ARGB8888"; break;
+        }
+
+        const volatile unsigned char *frame = buffer + header;
+        uint64_t hash =
+            sample_hash(frame, width, height, line, bpp, step);
+        uint32_t color =
+            dominant_color(frame, width, height, line, bpp, step);
         auto now = std::chrono::steady_clock::now();
 
         if (first || hash != last_hash) {
             last_hash = hash;
             last_color = color;
             last_change = now;
-            std::printf("changed 0.00 rgb=%06X\n", color);
             first = false;
-        } else {
-            double secs = std::chrono::duration<double>(now - last_change).count();
-            std::printf("unchanged %.2f rgb=%06X\n", secs, last_color);
         }
+
+        double secs =
+            std::chrono::duration<double>(now - last_change).count();
+
+        const char *endian =
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            "little";
+#else
+            "big";
+#endif
+
+        char status[256];
+        std::snprintf(status, sizeof(status),
+                      "%dx%d %d-bit %s %s %.2fs rgb=%06X",
+                      width, height, bpp * 8, pixfmt, endian, secs,
+                      last_color);
+        std::printf("\r%-80s", status);
         std::fflush(stdout);
         usleep(50000);
     }
