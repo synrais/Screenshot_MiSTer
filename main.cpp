@@ -15,7 +15,7 @@ with help from the MiSTer contributors including Grabulosaure
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#include "lib/imlib2/Imlib2.h"
+#include "lodepng.h"
 #include "scaler.h"
 
 const char *version = "$VER:ScreenShot" VDATE;
@@ -49,23 +49,18 @@ int main(int argc, char *argv[])
     fprintf(stderr,"\nScreenshot code by alanswx\n\n");
     fprintf(stderr,"Version %s\n\n", version + 5);
    
-    unsigned char *outputbuf = (unsigned char*)calloc(ms->width*ms->height*4,1);
-    mister_scaler_read_32(ms,outputbuf);
+    unsigned char *outputbuf = (unsigned char*)calloc(ms->width*ms->height*3,1);
+    mister_scaler_read(ms,outputbuf);
 
-    Imlib_Image im = imlib_create_image_using_data(ms->width, ms->height, (unsigned int *)outputbuf);
-    imlib_context_set_image(im);
-
-    if (!strcmp("-", filename))
-    {
-        fprintf(stderr,"not implemented\n");
-    }
-    else
-    {
-        imlib_save_image(filename);
+    unsigned error = lodepng_encode24_file(filename, outputbuf, ms->width, ms->height);
+    if(error) {
+        fprintf(stderr,"error %u: %s\n", error, lodepng_error_text(error));
+    } else {
         printf("saved: /tmp/.SAM_tmp/screenshots/%s\n", filename);
     }
 
     // No scaled image anymore
-    mister_scaler_free(ms); 
+    mister_scaler_free(ms);
+    free(outputbuf);
     return 0;
 }
