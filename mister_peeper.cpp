@@ -90,7 +90,7 @@ mister_scaler *mister_scaler_init() {
         return nullptr;
     }
 
-    unsigned char *buffer = (unsigned char *)(ms->map + ms->map_off);
+    volatile unsigned char *buffer = (volatile unsigned char *)(ms->map + ms->map_off);
     if (buffer[0] != 1 || buffer[1] != 1) {
         std::fprintf(stderr, "problem\n");
         mister_scaler_free(ms);
@@ -114,18 +114,18 @@ void mister_scaler_free(mister_scaler *ms) {
 }
 
 int mister_scaler_read(mister_scaler *ms, unsigned char *gbuf) {
-    unsigned char *buffer = (unsigned char *)(ms->map + ms->map_off);
+    volatile unsigned char *buffer = (volatile unsigned char *)(ms->map + ms->map_off);
     for (int y = 0; y < ms->height; y++) {
         std::memcpy(&gbuf[y*(ms->width*3)],
-                    &buffer[ms->header + y*ms->line],
+                    const_cast<const void*>(static_cast<volatile const void*>(&buffer[ms->header + y*ms->line])),
                     ms->width*3);
     }
     return 0;
 }
 
 int mister_scaler_read_32(mister_scaler *ms, unsigned char *gbuf) {
-    unsigned char *buffer = (unsigned char *)(ms->map + ms->map_off);
-    unsigned char *pixbuf;
+    volatile unsigned char *buffer = (volatile unsigned char *)(ms->map + ms->map_off);
+    volatile unsigned char *pixbuf;
     unsigned char *outbuf;
     for (int y = 0; y < ms->height; y++) {
         pixbuf = &buffer[ms->header + y*ms->line];
@@ -144,9 +144,9 @@ int mister_scaler_read_32(mister_scaler *ms, unsigned char *gbuf) {
 int mister_scaler_read_yuv(mister_scaler *ms, int lineY, unsigned char *bufY,
                            int lineU, unsigned char *bufU,
                            int lineV, unsigned char *bufV) {
-    unsigned char *buffer = (unsigned char *)(ms->map + ms->map_off);
+    volatile unsigned char *buffer = (volatile unsigned char *)(ms->map + ms->map_off);
     for (int y = 0; y < ms->height; y++) {
-        unsigned char *pixbuf = &buffer[ms->header + y*ms->line];
+        volatile unsigned char *pixbuf = &buffer[ms->header + y*ms->line];
         unsigned char *outbufy = &bufY[y*lineY];
         unsigned char *outbufU = &bufU[y*lineU];
         unsigned char *outbufV = &bufV[y*lineV];
@@ -166,14 +166,14 @@ int mister_scaler_read_yuv(mister_scaler *ms, int lineY, unsigned char *bufY,
 }
 
 // Sampled FNV-1a hash to cheaply detect changes
-static uint64_t sample_hash(const unsigned char *base, int width, int height,
+static uint64_t sample_hash(const volatile unsigned char *base, int width, int height,
                             int line, int bpp, int step) {
     uint64_t hash = 1469598103934665603ULL;
     const uint64_t prime = 1099511628211ULL;
     for (int y = 0; y < height; y += step) {
-        const unsigned char *row = base + y * line;
+        const volatile unsigned char *row = base + y * line;
         for (int x = 0; x < width; x += step) {
-            const unsigned char *p = row + x * bpp;
+            const volatile unsigned char *p = row + x * bpp;
             for (int i = 0; i < bpp; ++i) {
                 hash ^= p[i];
                 hash *= prime;
@@ -183,17 +183,17 @@ static uint64_t sample_hash(const unsigned char *base, int width, int height,
     return hash;
 }
 
-static uint32_t dominant_color(const unsigned char *base, int width, int height,
+static uint32_t dominant_color(const volatile unsigned char *base, int width, int height,
                                int line, int bpp, int step) {
     uint32_t counts[4096];
     memset(counts, 0, sizeof(counts));
 
     for (int y = 0; y < height; y += step) {
-        const unsigned char *pix = base + y * line;
+        const volatile unsigned char *pix = base + y * line;
         for (int x = 0; x < width; x += step) {
             int r = 0, g = 0, b = 0;
             if (bpp == 2) {
-                uint16_t v = pix[0] | (pix[1] << 8);
+                uint16_t v = static_cast<uint16_t>(pix[0]) | (static_cast<uint16_t>(pix[1]) << 8);
                 r = ((v >> 11) & 0x1F);
                 g = ((v >> 5) & 0x3F);
                 b = (v & 0x1F);
@@ -234,7 +234,7 @@ int main(int, char**) {
         return 1;
     }
 
-    unsigned char *buffer = (unsigned char*)(ms->map + ms->map_off);
+    volatile unsigned char *buffer = (volatile unsigned char*)(ms->map + ms->map_off);
     int bpp = buffer[4];
     uint8_t hdr5 = buffer[5];
     int width = ms->width;
@@ -279,7 +279,7 @@ int main(int, char**) {
     const int step = 4; // sample every 4th pixel to reduce CPU usage
 
     while (1) {
-        unsigned char *frame = buffer + ms->header;
+        const volatile unsigned char *frame = buffer + ms->header;
         uint64_t hash = sample_hash(frame, width, height, line, bpp, step);
         uint32_t color = dominant_color(frame, width, height, line, bpp, step);
         auto now = std::chrono::steady_clock::now();
