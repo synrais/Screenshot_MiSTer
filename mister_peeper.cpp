@@ -165,24 +165,32 @@ int mister_scaler_read_yuv(mister_scaler *ms, int lineY, unsigned char *bufY,
     return 0;
 }
 
-// FNV-1a 64-bit hash
-static uint64_t fnv1a(const unsigned char *data, size_t len) {
+// Sampled FNV-1a hash to cheaply detect changes
+static uint64_t sample_hash(const unsigned char *base, int width, int height,
+                            int line, int bpp, int step) {
     uint64_t hash = 1469598103934665603ULL;
     const uint64_t prime = 1099511628211ULL;
-    for (size_t i = 0; i < len; ++i) {
-        hash ^= data[i];
-        hash *= prime;
+    for (int y = 0; y < height; y += step) {
+        const unsigned char *row = base + y * line;
+        for (int x = 0; x < width; x += step) {
+            const unsigned char *p = row + x * bpp;
+            for (int i = 0; i < bpp; ++i) {
+                hash ^= p[i];
+                hash *= prime;
+            }
+        }
     }
     return hash;
 }
 
-static uint32_t dominant_color(const unsigned char *base, int width, int height, int line, int bpp) {
+static uint32_t dominant_color(const unsigned char *base, int width, int height,
+                               int line, int bpp, int step) {
     uint32_t counts[4096];
     memset(counts, 0, sizeof(counts));
 
-    for (int y = 0; y < height; ++y) {
+    for (int y = 0; y < height; y += step) {
         const unsigned char *pix = base + y * line;
-        for (int x = 0; x < width; ++x) {
+        for (int x = 0; x < width; x += step) {
             int r = 0, g = 0, b = 0;
             if (bpp == 2) {
                 uint16_t v = pix[0] | (pix[1] << 8);
@@ -192,16 +200,17 @@ static uint32_t dominant_color(const unsigned char *base, int width, int height,
                 r = (r << 3) | (r >> 2);
                 g = (g << 2) | (g >> 4);
                 b = (b << 3) | (b >> 2);
-                pix += 2;
+                pix += 2 * step;
             } else if (bpp == 4) {
-                b = *pix++;
-                g = *pix++;
-                r = *pix++;
-                pix++; // skip alpha
+                b = pix[0];
+                g = pix[1];
+                r = pix[2];
+                pix += 4 * step;
             } else { // assume 3 bytes RGB
-                r = *pix++;
-                g = *pix++;
-                b = *pix++;
+                r = pix[0];
+                g = pix[1];
+                b = pix[2];
+                pix += 3 * step;
             }
             int idx = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
             counts[idx]++;
@@ -253,11 +262,12 @@ int main(int, char**) {
     uint64_t last_hash = 0;
     uint32_t last_color = 0;
     bool first = true;
+    const int step = 4; // sample every 4th pixel to reduce CPU usage
 
     while (1) {
         unsigned char *frame = buffer + ms->header;
-        uint64_t hash = fnv1a(frame, line * height);
-        uint32_t color = dominant_color(frame, width, height, line, bpp);
+        uint64_t hash = sample_hash(frame, width, height, line, bpp, step);
+        uint32_t color = dominant_color(frame, width, height, line, bpp, step);
         auto now = std::chrono::steady_clock::now();
 
         if (first || hash != last_hash) {
