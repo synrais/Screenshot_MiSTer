@@ -26,10 +26,7 @@ OBJ	= $(SRC:.c=.c.o) $(SRC2:.cpp=.cpp.o)
 DFLAGS	= $(INCLUDE) -D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE -DVDATE=\"`date +"%y%m%d"`\"
 CFLAGS	= $(DFLAGS) -Wall -Wextra -Wno-strict-aliasing -c -O3
 
-IMLIB2_LIB  = -Llib/imlib2 -lfreetype -lbz2 -lpng16 -lz -lImlib2
-
-LFLAGS	= -lc -lstdc++ -lrt $(IMLIB2_LIB)
-
+LFLAGS  = -lc -lstdc++ -lrt
 
 
 $(PRJ): $(OBJ)
