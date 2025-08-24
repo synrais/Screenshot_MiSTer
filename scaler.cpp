@@ -39,11 +39,8 @@ mister_scaler * mister_scaler_init()
         return NULL;
     }
     buffer = (unsigned char *)(ms->map+ms->map_off);
-    printf (" 1: %02X %02X %02X %02X   %02X %02X %02X %02X   %02X %02X %02X %02X   %02X %02X %02X %02X\n",
-            buffer[0],buffer[1],buffer[2],buffer[3],buffer[4],buffer[5],buffer[6],buffer[7],
-            buffer[8],buffer[9],buffer[10],buffer[11],buffer[12],buffer[13],buffer[14],buffer[15]);
     if (buffer[0]!=1 || buffer[1]!=1) {
-        printf("problem\n");
+        fprintf(stderr,"problem\n");
         mister_scaler_free(ms);
         return NULL;
     }
@@ -55,7 +52,6 @@ mister_scaler * mister_scaler_init()
     ms->output_width =buffer[12]<<8 | buffer[13];
     ms->output_height=buffer[14]<<8 | buffer[15];
 
-    printf ("Image: Width=%i Height=%i  Line=%i  Header=%i output_width=%i output_height=%i \n",ms->width,ms->height,ms->line,ms->header,ms->output_width,ms->output_height);
    /*
     printf (" 1: %02X %02X %02X %02X   %02X %02X %02X %02X   %02X %02X %02X %02X   %02X %02X %02X %02X\n",
             buffer[0],buffer[1],buffer[2],buffer[3],buffer[4],buffer[5],buffer[6],buffer[7],
@@ -112,17 +108,8 @@ int mister_scaler_read(mister_scaler *ms,unsigned char *gbuf)
     unsigned char *buffer;
     buffer = (unsigned char *)(ms->map+ms->map_off);
 
-    // do this slow way for now..  - could use a memcpy?
-    unsigned char *pixbuf;
-    unsigned char *outbuf;
-    for (int  y=0; y< ms->height ; y++) {
-          pixbuf=&buffer[ms->header + y*ms->line];
-          outbuf=&gbuf[y*(ms->width*3)];
-          for (int x = 0; x < ms->width ; x++) {
-            *outbuf++ = *pixbuf++;
-            *outbuf++ = *pixbuf++;
-            *outbuf++ = *pixbuf++;
-          }
+    for (int y = 0; y < ms->height; y++) {
+        memcpy(&gbuf[y*(ms->width*3)], &buffer[ms->header + y*ms->line], ms->width*3);
     }
 
     return 0;
