@@ -184,7 +184,7 @@ static uint64_t sample_hash(const volatile unsigned char *base, int width, int h
 }
 
 static uint32_t dominant_color(const volatile unsigned char *base, int width, int height,
-                               int line, int bpp, int step) {
+                               int line, int bpp, int step, bool is_bgr, bool is_1555) {
     uint32_t counts[4096];
     memset(counts, 0, sizeof(counts));
 
@@ -192,24 +192,49 @@ static uint32_t dominant_color(const volatile unsigned char *base, int width, in
         const volatile unsigned char *pix = base + y * line;
         for (int x = 0; x < width; x += step) {
             int r = 0, g = 0, b = 0;
-            if (bpp == 2) {
-                uint16_t v = static_cast<uint16_t>(pix[0]) | (static_cast<uint16_t>(pix[1]) << 8);
-                r = ((v >> 11) & 0x1F);
-                g = ((v >> 5) & 0x3F);
-                b = (v & 0x1F);
-                r = (r << 3) | (r >> 2);
-                g = (g << 2) | (g >> 4);
-                b = (b << 3) | (b >> 2);
-                pix += 2 * step;
+            if (bpp == 1) {
+                r = g = b = pix[0];
+                pix += 1 * step;
+            } else if (bpp == 2) {
+                uint16_t v = static_cast<uint16_t>(pix[0]) |
+                             (static_cast<uint16_t>(pix[1]) << 8);
+                if (is_1555) {
+                    r = (v >> 10) & 0x1F;
+                    g = (v >> 5) & 0x1F;
+                    b = v & 0x1F;
+                    r = (r << 3) | (r >> 2);
+                    g = (g << 3) | (g >> 2);
+                    b = (b << 3) | (b >> 2);
+                } else {
+                    r = (v >> 11) & 0x1F;
+                    g = (v >> 5) & 0x3F;
+                    b = v & 0x1F;
+                    r = (r << 3) | (r >> 2);
+                    g = (g << 2) | (g >> 4);
+                    b = (b << 3) | (b >> 2);
+                }
+                if (is_bgr) { int tmp = r; r = b; b = tmp; }
             } else if (bpp == 4) {
-                b = pix[0];
-                g = pix[1];
-                r = pix[2];
+                if (is_bgr) {
+                    b = pix[0];
+                    g = pix[1];
+                    r = pix[2];
+                } else {
+                    r = pix[0];
+                    g = pix[1];
+                    b = pix[2];
+                }
                 pix += 4 * step;
-            } else { // assume 3 bytes RGB
-                r = pix[0];
-                g = pix[1];
-                b = pix[2];
+            } else {
+                if (is_bgr) {
+                    b = pix[0];
+                    g = pix[1];
+                    r = pix[2];
+                } else {
+                    r = pix[0];
+                    g = pix[1];
+                    b = pix[2];
+                }
                 pix += 3 * step;
             }
             int idx = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
@@ -260,7 +285,32 @@ int main(int, char**) {
         int new_line   = buffer[10] << 8 | buffer[11];
         int new_out_w  = buffer[12] << 8 | buffer[13];
         int new_out_h  = buffer[14] << 8 | buffer[15];
-        int new_bpp    = (buffer[4] & 0xFF) + 1; // encoded as bytes per pixel - 1
+        int fmt        = buffer[4];
+        int new_bpp    = 0;
+        bool is_bgr    = (fmt & 0x10) != 0;
+        bool is_1555   = false;
+        const char *pixfmt = "Unknown";
+
+        switch (fmt & 0x7) {
+            case 0x3:
+                new_bpp = 1;
+                pixfmt = "PAL8";
+                break;
+            case 0x4:
+                new_bpp = 2;
+                is_1555 = (fmt & 0x8) != 0;
+                if (is_1555) pixfmt = is_bgr ? "BGR1555" : "RGB1555";
+                else         pixfmt = is_bgr ? "BGR565"  : "RGB565";
+                break;
+            case 0x5:
+                new_bpp = 3;
+                pixfmt = is_bgr ? "BGR888" : "RGB888";
+                break;
+            case 0x6:
+                new_bpp = 4;
+                pixfmt = is_bgr ? "ABGR8888" : "ARGB8888";
+                break;
+        }
 
         bool meta_changed = (new_header != header) || (new_width != width) ||
                             (new_height != height) || (new_line != line) ||
@@ -279,19 +329,11 @@ int main(int, char**) {
         (void)out_h;
         (void)hdr5;
 
-        const char *pixfmt = "Unknown";
-        switch (bpp) {
-            case 1: pixfmt = "8-bit"; break;
-            case 2: pixfmt = "RGB565"; break;
-            case 3: pixfmt = "RGB888"; break;
-            case 4: pixfmt = "ARGB8888"; break;
-        }
-
         const volatile unsigned char *frame = buffer + header;
         uint64_t hash =
             sample_hash(frame, width, height, line, bpp, step);
         uint32_t color =
-            dominant_color(frame, width, height, line, bpp, step);
+            dominant_color(frame, width, height, line, bpp, step, is_bgr, is_1555);
         auto now = std::chrono::steady_clock::now();
 
         if (first || meta_changed || hash != last_hash) {
