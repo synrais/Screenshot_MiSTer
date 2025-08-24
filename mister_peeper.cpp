@@ -1,8 +1,9 @@
 // mister_peeper.cpp
 //
-// Standalone MiSTer framebuffer monitor.
-// Reports: timestamp, resolution, bit depth, format, endian, main color, time since last change.
-// Prints all info on one line per change.
+// MiSTer framebuffer monitor
+// Reports: timestamp, resolution, depth, format, endian, main color, Δt since last change
+// Prints all info on one line per change
+//
 // Build: g++ -O2 -std=c++17 mister_peeper.cpp -o mister_peeper
 // Run as root: sudo ./mister_peeper
 
@@ -17,24 +18,24 @@
 #include <ctime>
 #include <string>
 
-// Simplified ASCAL header (adjust fields if Screenshot_MiSTer updates)
+// Correct ASCAL header definition (from MiSTer Screenshot source)
 struct AscalHeader {
-    char     magic[4];    // "ASCL"
-    uint16_t ver;
-    uint16_t hdr_size;
+    uint32_t magic;      // "ASCL" = 0x4C534341
+    uint16_t version;
+    uint16_t header_size;
     uint16_t width;
     uint16_t height;
-    uint16_t depth;       // bits per pixel
-    uint16_t format;      // 0=RGB, 1=ARGB, 2=YUV, etc.
-    uint16_t endian;      // 0=little, 1=big
-    uint32_t fb_offset;   // framebuffer start offset
-    // (real header has more fields, we only need these)
+    uint16_t pitch;
+    uint16_t format;     // 0=RGB, 1=ARGB, 2=YUV
+    uint16_t depth;      // bits per pixel
+    uint16_t flags;      // bit0=endian (0=LE, 1=BE)
+    uint32_t fb_offset;  // framebuffer offset
+    uint32_t fb_size;    // framebuffer size
 };
 
-constexpr off_t ASCAL_OFFSET = 0x20000000;   // Base of ASCAL
-constexpr size_t MAP_SIZE = 2*1024*1024;     // Map 2MB window
+constexpr off_t ASCAL_BASE = 0x20000000; // ASCAL base address
+constexpr size_t MAP_SIZE = 2*1024*1024; // map 2MB window (safe)
 
-// Map /dev/mem
 uint8_t* map_dev_mem(off_t offset, size_t size) {
     int fd = open("/dev/mem", O_RDONLY | O_SYNC);
     if (fd < 0) { perror("open"); exit(1); }
@@ -47,7 +48,7 @@ uint8_t* map_dev_mem(off_t offset, size_t size) {
     return reinterpret_cast<uint8_t*>(map) + delta;
 }
 
-std::string format_desc(uint16_t fmt, uint16_t depth, uint16_t endian) {
+std::string format_desc(uint16_t fmt, uint16_t depth, bool endian) {
     std::string f;
     switch(fmt) {
         case 0: f = "RGB"; break;
@@ -61,33 +62,40 @@ std::string format_desc(uint16_t fmt, uint16_t depth, uint16_t endian) {
 }
 
 int main() {
-    uint8_t* base = map_dev_mem(ASCAL_OFFSET, MAP_SIZE);
+    uint8_t* base = map_dev_mem(ASCAL_BASE, MAP_SIZE);
     auto* hdr = reinterpret_cast<AscalHeader*>(base);
 
-    uint8_t last_counter = *(base + 5);  // frame counter byte
+    // Verify header
+    if (hdr->magic != 0x4C534341) { // "ASCL"
+        std::cerr << "ASCAL header magic not found (expected 'ASCL')" << std::endl;
+        return 1;
+    }
+
+    uint8_t* counter_ptr = base + 5;
+    uint8_t last_counter = *counter_ptr;
     auto last_time = std::chrono::steady_clock::now();
 
     while (true) {
-        uint8_t counter = *(base + 5);
+        uint8_t counter = *counter_ptr;
         if (counter != last_counter) {
             last_counter = counter;
+
             auto now = std::chrono::steady_clock::now();
             std::chrono::duration<double> diff = now - last_time;
             last_time = now;
 
-            int w = hdr->width;
-            int h = hdr->height;
-            int depth = hdr->depth;
-            int fmt = hdr->format;
-            int endian = hdr->endian;
+            int w      = hdr->width;
+            int h      = hdr->height;
+            int depth  = hdr->depth;
+            int fmt    = hdr->format;
+            bool endian = hdr->flags & 1;
             off_t fb_off = hdr->fb_offset;
-
-            size_t fb_size = (w * h * depth) / 8;
+            size_t fb_size = hdr->fb_size;
             uint8_t* fb = base + fb_off;
 
-            // Count colors (sample pixels sparsely for speed)
+            // Sample pixels
             std::unordered_map<uint32_t, size_t> freq;
-            size_t step = (depth/8 > 0) ? (depth/8) * 100 : 3; // skip ~100px
+            size_t step = (depth/8 > 0) ? (depth/8) * 100 : 3;
             for (size_t i = 0; i + (depth/8) <= fb_size; i += step) {
                 uint32_t rgb = 0;
                 if (depth == 16) {
@@ -105,7 +113,7 @@ int main() {
                 } else if (depth == 32) {
                     uint32_t px = *reinterpret_cast<uint32_t*>(fb+i);
                     if (endian) px = __builtin_bswap32(px);
-                    rgb = px & 0xFFFFFF; // ignore alpha
+                    rgb = px & 0xFFFFFF;
                 }
                 freq[rgb]++;
             }
@@ -135,7 +143,6 @@ int main() {
                       << diff.count() << "s"
                       << std::endl;
         }
-        // Polling sleep (≈100 checks/sec, prints only on frame change)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
