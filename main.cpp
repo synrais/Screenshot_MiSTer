@@ -29,8 +29,14 @@ void mister_scaler_free(mister_scaler *);
 int main(int argc, char *argv[])
 {
     // Always write into RAM tmp folder
-    mkdir("/tmp/.SAM_tmp/screenshots", 0777);
-    chdir("/tmp/.SAM_tmp/screenshots");
+    if (mkdir("/tmp/.SAM_tmp/screenshots", 0777) != 0 && errno != EEXIST) {
+        perror("mkdir");
+        return 1;
+    }
+    if (chdir("/tmp/.SAM_tmp/screenshots") != 0) {
+        perror("chdir");
+        return 1;
+    }
 
     char filename[4096];
     strcpy(filename,"MiSTer_screenshot.png");
