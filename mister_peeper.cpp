@@ -292,24 +292,30 @@ int main(int, char**) {
         const char *pixfmt = "Unknown";
 
         switch (fmt & 0x7) {
-            case 0x3:
+            case 0x0:
                 new_bpp = 1;
                 pixfmt = "PAL8";
                 break;
-            case 0x4:
+            case 0x1:
                 new_bpp = 2;
                 is_1555 = (fmt & 0x8) != 0;
                 if (is_1555) pixfmt = is_bgr ? "BGR1555" : "RGB1555";
                 else         pixfmt = is_bgr ? "BGR565"  : "RGB565";
                 break;
-            case 0x5:
+            case 0x2:
                 new_bpp = 3;
                 pixfmt = is_bgr ? "BGR888" : "RGB888";
                 break;
-            case 0x6:
+            case 0x3:
                 new_bpp = 4;
                 pixfmt = is_bgr ? "ABGR8888" : "ARGB8888";
                 break;
+            default: {
+                static char unknown[16];
+                std::snprintf(unknown, sizeof(unknown), "fmt=%02X", fmt);
+                pixfmt = unknown;
+                break;
+            }
         }
 
         bool meta_changed = (new_header != header) || (new_width != width) ||
