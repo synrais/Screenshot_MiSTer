@@ -50,7 +50,7 @@ void *shmem_map(uint32_t address, uint32_t size) {
 
 int shmem_unmap(void *map, uint32_t size) {
     if (munmap(map, size) < 0) {
-        std::printf("Error: Unable to unmap(0x%X, %d)!\n", (uint32_t)map, size);
+        std::printf("Error: Unable to unmap(%p, %d)!\n", map, size);
         return 0;
     }
     return 1;
@@ -242,28 +242,38 @@ int main(int, char**) {
     uint32_t last_color = 0;
     bool first = true;
     const int step = 4; // sample every 4th pixel to reduce CPU usage
-   
-     // Cache header-derived fields but refresh them when the header moves
+
+    // Track current scaler state.  These values may change even when the
+    // framebuffer offset remains the same, so refresh them every iteration.
     int header = ms->header;
     int width  = ms->width;
     int height = ms->height;
     int line   = ms->line;
     int out_w  = ms->output_width;
     int out_h  = ms->output_height;
+    int bpp    = 0;
 
     while (1) {
-       // Read the current frame offset and update cached dimensions if needed
         int new_header = buffer[2] << 8 | buffer[3];
-        if (new_header != header) {
-            header = new_header;
-            width  = buffer[6]  << 8 | buffer[7];
-            height = buffer[8]  << 8 | buffer[9];
-            line   = buffer[10] << 8 | buffer[11];
-            out_w  = buffer[12] << 8 | buffer[13];
-            out_h  = buffer[14] << 8 | buffer[15];
-        }
+        int new_width  = buffer[6]  << 8 | buffer[7];
+        int new_height = buffer[8]  << 8 | buffer[9];
+        int new_line   = buffer[10] << 8 | buffer[11];
+        int new_out_w  = buffer[12] << 8 | buffer[13];
+        int new_out_h  = buffer[14] << 8 | buffer[15];
+        int new_bpp    = (buffer[4] & 0xFF) + 1; // encoded as bytes per pixel - 1
 
-        int bpp = buffer[4];
+        bool meta_changed = (new_header != header) || (new_width != width) ||
+                            (new_height != height) || (new_line != line) ||
+                            (new_bpp != bpp);
+
+        header = new_header;
+        width  = new_width;
+        height = new_height;
+        line   = new_line;
+        out_w  = new_out_w;
+        out_h  = new_out_h;
+        bpp    = new_bpp;
+
         uint8_t hdr5 = buffer[5];
         (void)out_w;
         (void)out_h;
@@ -284,7 +294,7 @@ int main(int, char**) {
             dominant_color(frame, width, height, line, bpp, step);
         auto now = std::chrono::steady_clock::now();
 
-        if (first || hash != last_hash) {
+        if (first || meta_changed || hash != last_hash) {
             last_hash = hash;
             last_color = color;
             last_change = now;
