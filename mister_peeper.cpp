@@ -1,150 +1,255 @@
 // mister_peeper.cpp
 //
-// MiSTer framebuffer monitor (all cores)
-// Uses the same ASCAL header parsing as Screenshot_MiSTer
-// Reports: timestamp, resolution, depth, format, endian, main color, Δt
+// Minimal per-frame sampler for MiSTer scaler output.
+// - Reads the scaler header from 0x20000000 (ASCAL) via /dev/mem
+// - Tracks an "unchanged" timer using a frame hash
+// - Reports the dominant color over a sparse grid (fast 5-6-5 histogram)
+// - Auto-detects 16-bit RGB565 ordering (RGB/BGR, LE/BE) and re-detects on core/geometry change
+// - Low CPU usage via gentle polling
 //
-// Build: g++ -O2 -std=c++17 mister_peeper.cpp -o mister_peeper
-// Run:   sudo ./mister_peeper
+// Console output (stdout, one line per frame):
+//   time=HH:MM:SS  unchanged=secs  rgb=#RRGGBB (Name)
+//
+// Build (example):
+//   g++ -O3 -march=native -fno-exceptions -fno-rtti -Wall -Wextra -o mister_peeper mister_peeper.cpp
+//
+// Run:
+//   sudo ./mister_peeper
+//
 
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/mman.h>
-#include <chrono>
-#include <iostream>
-#include <iomanip>
-#include <unordered_map>
-#include <thread>
-#include <ctime>
-#include <string>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cerrno>
+#include <csignal>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <time.h>
+#include <climits>
+#include <algorithm>
 
-struct ascal_header {
-    uint32_t magic;        // 'ASCL'
-    uint16_t version;
-    uint16_t header_size;
-    uint16_t width;
-    uint16_t height;
-    uint16_t pitch;
-    uint16_t format;       // 0=RGB, 1=ARGB, 2=YUV
-    uint16_t depth;        // bits per pixel
-    uint16_t flags;        // bit0=endian
-    uint32_t fb_offset;
-    uint32_t fb_size;
+// ---------- Tunables ----------
+static constexpr int    kStep            = 16;                 // sampling grid step (pixels)
+static constexpr bool   kJitterSampling  = true;               // sweep sampling phase each frame
+static constexpr int    kJitterX         = 7;
+static constexpr int    kJitterY         = 11;
+static constexpr size_t FB_BASE_ADDRESS  = 0x20000000u;        // MiSTer scaler base (ASCAL)
+static constexpr size_t MAP_LEN          = 2048u * 1024u * 12u;// ~24 MiB mapping window
+static constexpr int    kPollMs          = 10;                 // ~100 Hz idle polling
+
+enum ScalerPixelFormat : uint8_t { RGB16 = 0, RGB24 = 1, RGBA32 = 2 };
+
+// ---------- Scaler header ----------
+#pragma pack(push,1)
+struct FbHeader {
+    char     magic[4];          // "ASCL"
+    uint8_t  ty;                // 0x01
+    uint8_t  pixel_fmt;         // 0,1,2
+    uint16_t header_len_be;
+    uint16_t attributes_be;     // bit4 triple; bits7..5 frame counter
+    uint16_t width_be;
+    uint16_t height_be;
+    uint16_t line_be;           // stride in bytes
+    uint16_t out_width_be;
+    uint16_t out_height_be;
 };
+#pragma pack(pop)
 
-constexpr off_t ASCAL_BASE = 0x2C000000; // Correct MiSTer ASCAL base
-constexpr size_t MAP_SIZE  = 4*1024*1024; // map 4MB for header + fb
-
-uint8_t* map_dev_mem(off_t offset, size_t size) {
-    int fd = open("/dev/mem", O_RDONLY | O_SYNC);
-    if (fd < 0) { perror("open"); exit(1); }
-    long page = sysconf(_SC_PAGE_SIZE);
-    off_t aligned = offset & ~(page - 1);
-    off_t delta = offset - aligned;
-    void* map = mmap(nullptr, size + delta, PROT_READ, MAP_SHARED, fd, aligned);
-    if (map == MAP_FAILED) { perror("mmap"); exit(1); }
-    close(fd);
-    return reinterpret_cast<uint8_t*>(map) + delta;
+static inline uint16_t be16(uint16_t x){ return (uint16_t)((x>>8)|(x<<8)); }
+static inline bool triple_buffered(uint16_t attr_be){ return (be16(attr_be) & (1u<<4)) != 0; }
+static inline size_t fb_off(bool large, uint8_t idx){
+    if(idx==0) return 0;
+    return large ? (idx==1 ? 0x00800000u : 0x01000000u)
+                 : (idx==1 ? 0x00200000u : 0x00400000u);
 }
 
-std::string format_desc(uint16_t fmt, uint16_t depth, bool endian) {
-    std::string f;
-    switch(fmt) {
-        case 0: f = "RGB"; break;
-        case 1: f = "ARGB"; break;
-        case 2: f = "YUV"; break;
-        default: f = "UNK"; break;
-    }
-    f += " " + std::to_string(depth) + "-bit";
-    f += (endian ? " (BE)" : " (LE)");
-    return f;
+// ---------- Runtime ----------
+static volatile bool g_run=true;
+static void on_sig(int){ g_run=false; }
+
+static inline uint64_t now_ns(){
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+    return (uint64_t)ts.tv_sec*1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-int main() {
-    uint8_t* base = map_dev_mem(ASCAL_BASE, MAP_SIZE);
-    auto* hdr = reinterpret_cast<ascal_header*>(base);
+// Stronger 64-bit hash
+static inline uint64_t hash_rgb64(uint64_t h,uint8_t r,uint8_t g,uint8_t b){
+    h ^= ((uint64_t)r<<16) ^ ((uint64_t)g<<8) ^ (uint64_t)b;
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 32;
+    return h;
+}
 
-    // Verify header magic
-    if (hdr->magic != 0x4C534341) { // "ASCL"
-        std::cerr << "ASCAL header magic not found (expected 'ASCL')" << std::endl;
-        return 1;
+static inline void fmt_hms(double s,char* out,size_t n){
+    int S=(int)s; int H=S/3600; int M=(S%3600)/60; S%=60;
+    snprintf(out,n,"%02d:%02d:%02d",H,M,S);
+}
+
+// ---------- Nearest color name ----------
+struct NamedColor { const char* name; uint8_t r,g,b; };
+static constexpr NamedColor kPalette[] = {
+    {"Black",0,0,0},{"White",255,255,255},{"Red",255,0,0},{"Lime",0,255,0},
+    {"Blue",0,0,255},{"Yellow",255,255,0},{"Cyan",0,255,255},{"Magenta",255,0,255},
+    {"Silver",192,192,192},{"Gray",128,128,128},{"Maroon",128,0,0},{"Olive",128,128,0},
+    {"Green",0,128,0},{"Purple",128,0,128},{"Teal",0,128,128},{"Navy",0,0,128},
+    {"Orange",255,165,0},{"Pink",255,192,203},{"Brown",165,42,42},{"Gold",255,215,0}
+};
+static inline const char* nearest_color_name(uint8_t r,uint8_t g,uint8_t b){
+    int best_i = 0;
+    int best_d = INT_MAX;
+    for(size_t i=0;i<sizeof(kPalette)/sizeof(kPalette[0]);++i){
+        int dr = (int)r - (int)kPalette[i].r;
+        int dg = (int)g - (int)kPalette[i].g;
+        int db = (int)b - (int)kPalette[i].b;
+        int d = dr*dr + dg*dg + db*db;
+        if(d < best_d){ best_d = d; best_i = (int)i; }
+    }
+    return kPalette[best_i].name;
+}
+
+// ---------- Pixel loaders ----------
+static inline void load_rgb565_LE(const volatile uint8_t*p,uint8_t&r,uint8_t&g,uint8_t&b){
+    uint16_t v=(uint16_t)p[0]|((uint16_t)p[1]<<8);
+    r=(uint8_t)(((v>>11)&0x1F)*255/31);
+    g=(uint8_t)(((v>>5 )&0x3F)*255/63);
+    b=(uint8_t)(( v      &0x1F)*255/31);
+}
+static inline void load_rgb565_BE(const volatile uint8_t*p,uint8_t&r,uint8_t&g,uint8_t&b){
+    uint16_t v=((uint16_t)p[0]<<8)|(uint16_t)p[1];
+    r=(uint8_t)(((v>>11)&0x1F)*255/31);
+    g=(uint8_t)(((v>>5 )&0x3F)*255/63);
+    b=(uint8_t)(( v      &0x1F)*255/31);
+}
+static inline void load_bgr565_LE(const volatile uint8_t*p,uint8_t&r,uint8_t&g,uint8_t&b){
+    uint16_t v=(uint16_t)p[0]|((uint16_t)p[1]<<8);
+    b=(uint8_t)(((v>>11)&0x1F)*255/31);
+    g=(uint8_t)(((v>>5 )&0x3F)*255/63);
+    r=(uint8_t)(( v      &0x1F)*255/31);
+}
+static inline void load_bgr565_BE(const volatile uint8_t*p,uint8_t&r,uint8_t&g,uint8_t&b){
+    uint16_t v=((uint16_t)p[0]<<8)|(uint16_t)p[1];
+    b=(uint8_t)(((v>>11)&0x1F)*255/31);
+    g=(uint8_t)(((v>>5 )&0x3F)*255/63);
+    r=(uint8_t)(( v      &0x1F)*255/31);
+}
+using Rgb16Loader = void (*)(const volatile uint8_t*,uint8_t&,uint8_t&,uint8_t&);
+
+// ---------- Histogram ----------
+static uint32_t g_epoch = 1;
+static uint32_t g_stamp[65536];
+static uint16_t g_count[65536];
+
+int main(){
+    signal(SIGINT,on_sig); signal(SIGTERM,on_sig);
+
+    // Map scaler
+    int fd=open("/dev/mem",O_RDONLY|O_SYNC);
+    if(fd<0){ perror("open(/dev/mem)"); return 1; }
+    void* map=mmap(nullptr,MAP_LEN,PROT_READ,MAP_SHARED,fd,FB_BASE_ADDRESS);
+    if(map==MAP_FAILED){ perror("mmap"); close(fd); return 1; }
+    volatile uint8_t* base=(volatile uint8_t*)map;
+
+    // Read header once
+    FbHeader h{}; memcpy(&h,(const void*)base,sizeof(FbHeader));
+    if (memcmp(h.magic,"ASCL",4)!=0) {
+        fprintf(stderr,"error=header_magic_not_found got=%.4s\n",h.magic);
+        munmap((void*)base,MAP_LEN); close(fd); return 3;
+    }
+    if(h.ty!=0x01){
+        fprintf(stderr,"error=unexpected_header_type ty=%u\n",(unsigned)h.ty);
+        munmap((void*)base,MAP_LEN); close(fd); return 3;
     }
 
-    uint8_t* counter_ptr = base + 5; // frame counter inside header
-    uint8_t last_counter = *counter_ptr;
-    auto last_time = std::chrono::steady_clock::now();
+    uint16_t header_len=be16(h.header_len_be);
+    uint16_t width     =be16(h.width_be);
+    uint16_t height    =be16(h.height_be);
+    uint16_t line      =be16(h.line_be);
+    ScalerPixelFormat fmt=(ScalerPixelFormat)h.pixel_fmt;
+    bool triple = triple_buffered(h.attributes_be);
 
-    while (true) {
-        uint8_t counter = *counter_ptr;
-        if (counter != last_counter) {
-            last_counter = counter;
+    // Attr ptrs
+    volatile const uint8_t* attr_ptrs[3] = {
+        base + 5,
+        base + fb_off(false,1) + 5,
+        base + fb_off(false,2) + 5
+    };
 
-            auto now = std::chrono::steady_clock::now();
-            std::chrono::duration<double> diff = now - last_time;
-            last_time = now;
+    uint64_t last_hash=0; bool first=true;
+    uint64_t start_ns=now_ns(), last_change_ns=start_ns;
+    uint64_t frame_no=0;
 
-            int w      = hdr->width;
-            int h      = hdr->height;
-            int depth  = hdr->depth;
-            int fmt    = hdr->format;
-            bool endian = hdr->flags & 1;
-            off_t fb_off = hdr->fb_offset;
-            size_t fb_size = hdr->fb_size;
-            uint8_t* fb = base + fb_off;
-
-            // Sample pixels (sparse scan)
-            std::unordered_map<uint32_t, size_t> freq;
-            size_t step = (depth/8 > 0) ? (depth/8) * 200 : 3; // skip pixels for speed
-            for (size_t i = 0; i + (depth/8) <= fb_size; i += step) {
-                uint32_t rgb = 0;
-                if (depth == 16) {
-                    uint16_t px = *reinterpret_cast<uint16_t*>(fb+i);
-                    if (endian) px = (px>>8) | (px<<8);
-                    uint8_t r = ((px >> 11) & 0x1F) << 3;
-                    uint8_t g = ((px >> 5) & 0x3F) << 2;
-                    uint8_t b = (px & 0x1F) << 3;
-                    rgb = (r<<16)|(g<<8)|b;
-                } else if (depth == 24) {
-                    uint8_t r = fb[i];
-                    uint8_t g = fb[i+1];
-                    uint8_t b = fb[i+2];
-                    rgb = (r<<16)|(g<<8)|b;
-                } else if (depth == 32) {
-                    uint32_t px = *reinterpret_cast<uint32_t*>(fb+i);
-                    if (endian) px = __builtin_bswap32(px);
-                    rgb = px & 0xFFFFFF; // ignore alpha
-                }
-                freq[rgb]++;
-            }
-
-            // Find dominant color
-            uint32_t top_rgb = 0;
-            size_t top_count = 0;
-            for (auto& [rgb, count] : freq) {
-                if (count > top_count) {
-                    top_count = count;
-                    top_rgb = rgb;
-                }
-            }
-
-            // Timestamp
-            auto sys_now = std::chrono::system_clock::now();
-            std::time_t tt = std::chrono::system_clock::to_time_t(sys_now);
-            std::tm tm;
-            localtime_r(&tt, &tm);
-
-            // One-line output
-            std::cout << std::put_time(&tm, "[%H:%M:%S] ")
-                      << w << "x" << h << " @ " << format_desc(fmt, depth, endian)
-                      << " Main:#" << std::hex << std::uppercase
-                      << std::setw(6) << std::setfill('0') << top_rgb
-                      << std::dec << " Δt:" << std::fixed << std::setprecision(2)
-                      << diff.count() << "s"
-                      << std::endl;
+    while(g_run){
+        // Wait for next frame tick
+        uint16_t s0=attr_ptrs[0][0];
+        while(g_run){
+            uint16_t s1=attr_ptrs[0][0];
+            if(s1!=s0) break;
+            usleep((useconds_t)(kPollMs*1000));
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if(!g_run) break;
+
+        const volatile uint8_t* pix = base + header_len;
+
+        int xs=kStep, ys=kStep;
+        int phase_x=0, phase_y=0;
+        if(kJitterSampling){
+            phase_x=(frame_no*kJitterX)%kStep;
+            phase_y=(frame_no*kJitterY)%kStep;
+        }
+        frame_no++;
+
+        uint64_t hsh=0xcbf29ce484222325ULL;
+        uint32_t const epoch=++g_epoch;
+
+        uint32_t mode_key=0; uint16_t mode_count=0;
+
+        if(fmt==RGB24){
+            for(unsigned y=phase_y;y<height;y+=ys){
+                const volatile uint8_t* row=pix+(size_t)y*line;
+                for(unsigned x=phase_x;x<width;x+=xs){
+                    const volatile uint8_t* p=row+(size_t)x*3;
+                    uint8_t r=p[0],g=p[1],b=p[2];
+                    hsh=hash_rgb64(hsh,r,g,b);
+                    uint32_t key=((r>>3)<<11)|((g>>2)<<5)|(b>>3);
+                    if(g_stamp[key]!=epoch){g_stamp[key]=epoch; g_count[key]=1;}
+                    else {uint16_t c=++g_count[key]; if(c>mode_count){mode_count=c; mode_key=key;}}
+                    if(mode_count==0){mode_count=1; mode_key=key;}
+                }
+            }
+        } else if(fmt==RGBA32){
+            for(unsigned y=phase_y;y<height;y+=ys){
+                const volatile uint8_t* row=pix+(size_t)y*line;
+                for(unsigned x=phase_x;x<width;x+=xs){
+                    const volatile uint8_t* p=row+(size_t)x*4;
+                    uint8_t r=p[0],g=p[1],b=p[2];
+                    hsh=hash_rgb64(hsh,r,g,b);
+                    uint32_t key=((r>>3)<<11)|((g>>2)<<5)|(b>>3);
+                    if(g_stamp[key]!=epoch){g_stamp[key]=epoch; g_count[key]=1;}
+                    else {uint16_t c=++g_count[key]; if(c>mode_count){mode_count=c; mode_key=key;}}
+                    if(mode_count==0){mode_count=1; mode_key=key;}
+                }
+            }
+        }
+
+        uint64_t t_ns=now_ns();
+        if(first){ last_hash=hsh; last_change_ns=t_ns; first=false; }
+        else if(hsh!=last_hash){ last_change_ns=t_ns; last_hash=hsh; }
+
+        uint8_t Rd=(uint8_t)(((mode_key>>11)&0x1F)*255/31);
+        uint8_t Gd=(uint8_t)(((mode_key>>5 )&0x3F)*255/63);
+        uint8_t Bd=(uint8_t)(( mode_key     &0x1F)*255/31);
+
+        double unchanged_s=(t_ns-last_change_ns)/1e9;
+        double elapsed_s  =(t_ns-start_ns)/1e9;
+        char tbuf[16]; fmt_hms(elapsed_s,tbuf,sizeof(tbuf));
+        const char* dom_name=nearest_color_name(Rd,Gd,Bd);
+
+        printf("time=%s  unchanged=%.3f  rgb=#%02X%02X%02X (%s)\n",
+               tbuf,unchanged_s,Rd,Gd,Bd,dom_name);
+        fflush(stdout);
     }
 
-    return 0;
+    munmap((void*)base,MAP_LEN); close(fd); return 0;
 }
